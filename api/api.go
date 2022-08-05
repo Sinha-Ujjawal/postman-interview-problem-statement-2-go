@@ -72,11 +72,11 @@ func New(
 		scheme: scheme,
 		host:   host,
 		endpoints: apiEndpoints{
-			auth:       defaultAuthEndpoint,
-			categories: defaultCategoriesEndpoint,
-			entry:      defaultEntryEndpoint,
+			auth:       DefaultAuthEndpoint,
+			categories: DefaultCategoriesEndpoint,
+			entry:      DefaultEntryEndpoint,
 		},
-		maxAttempts: defaultMaxAttempts,
+		maxAttempts: DefaultMaxAttempts,
 	}
 	for _, opt := range opts {
 		opt(&a)
