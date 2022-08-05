@@ -119,7 +119,7 @@ func (a *api) println(v ...any) {
 	}
 }
 
-func (a *api) get(u *url.URL) result.Result[[]byte] {
+func (a *api) get(u *url.URL) ([]byte, error) {
 	ustr := u.String()
 	a.printf("Get Request: %s\n", ustr)
 	attempts := uint8(0)
@@ -131,12 +131,12 @@ func (a *api) get(u *url.URL) result.Result[[]byte] {
 		}
 		req, err := http.NewRequest("GET", ustr, nil)
 		if err != nil {
-			return result.Err[[]byte](err)
+			return nil, err
 		}
 		req.Header.Set("Authorization", bearerToken(a.authToken))
 		resp, err := client.Do(req)
 		if err != nil {
-			return result.Err[[]byte](err)
+			return nil, err
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
 			resp.Body.Close()
@@ -154,19 +154,19 @@ func (a *api) get(u *url.URL) result.Result[[]byte] {
 			defer resp.Body.Close()
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
-				return result.Err[[]byte](err)
+				return nil, err
 			}
-			return result.Ok(body)
+			return body, nil
 		} else {
 			resp.Body.Close()
 			a.println("Unauthorized or token expired, reauthentication...")
 			err = a.setToken()
 			if err != nil {
-				return result.Err[[]byte](err)
+				return nil, err
 			}
 		}
 	}
-	return result.Err[[]byte](errors.New(fmt.Sprintf("Max attempts: %d reached!", a.maxAttempts)))
+	return nil, errors.New(fmt.Sprintf("Max attempts: %d reached!", a.maxAttempts))
 }
 
 func getPagedResponse[T any](
@@ -183,7 +183,7 @@ func getPagedResponse[T any](
 	page := uint32(1)
 	for {
 		setPage(u, page)
-		payload, err := a.get(u).Unwrap()
+		payload, err := a.get(u)
 		if err != nil {
 			break
 		}
@@ -205,7 +205,7 @@ func (a *api) setToken() error {
 			Host:   a.host,
 			Path:   a.endpoints.auth.Path,
 		}
-		body, err := a.get(u).Unwrap()
+		body, err := a.get(u)
 		if err != nil {
 			return err
 		}
