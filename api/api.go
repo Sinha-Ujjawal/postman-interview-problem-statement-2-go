@@ -10,10 +10,12 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 )
 
 const DefaultMaxAttempts = 10
+const DefaultMinAuthTokenRefreshInterval time.Duration = time.Minute * 1
 
 var NoMoreResponse = errors.New("No More Response!")
 var DefaultAuthEndpoint = Endpoint{Path: "/api/v1/auth/token"}
@@ -31,12 +33,15 @@ type apiEndpoints struct {
 }
 
 type api struct {
-	scheme      string
-	host        string
-	endpoints   apiEndpoints
-	authToken   string
-	maxAttempts uint8
-	logger      optional.Optional[*log.Logger]
+	scheme                      string
+	host                        string
+	endpoints                   apiEndpoints
+	authToken                   string
+	authTokenLastRefresh        time.Time
+	minAuthTokenRefreshInterval time.Duration
+	authTokenMutex              sync.Mutex
+	maxAttempts                 uint8
+	logger                      optional.Optional[*log.Logger]
 }
 
 type apiOption func(*api)
@@ -71,11 +76,17 @@ func WithLogger(logger *log.Logger) apiOption {
 	}
 }
 
+func WithMinAuthTokenRefreshInterval(minAuthTokenRefreshInterval time.Duration) apiOption {
+	return func(api *api) {
+		api.minAuthTokenRefreshInterval = minAuthTokenRefreshInterval
+	}
+}
+
 func New(
 	scheme string,
 	host string,
 	opts ...apiOption,
-) api {
+) *api {
 	a := api{
 		scheme: scheme,
 		host:   host,
@@ -84,27 +95,28 @@ func New(
 			categories: DefaultCategoriesEndpoint,
 			entry:      DefaultEntryEndpoint,
 		},
-		maxAttempts: DefaultMaxAttempts,
-		logger:      optional.None[*log.Logger](),
+		maxAttempts:                 DefaultMaxAttempts,
+		minAuthTokenRefreshInterval: DefaultMinAuthTokenRefreshInterval,
+		logger:                      optional.None[*log.Logger](),
 	}
 	for _, opt := range opts {
 		opt(&a)
 	}
-	return a
+	return &a
 }
 
 func bearerToken(token string) string {
 	return fmt.Sprintf("Bearer %s", token)
 }
 
-func (a api) Printf(format string, v ...any) {
+func (a *api) printf(format string, v ...any) {
 	logger, err := a.logger.Unwrap()
 	if err == nil {
 		logger.Printf(format, v...)
 	}
 }
 
-func (a api) Println(v ...any) {
+func (a *api) println(v ...any) {
 	logger, err := a.logger.Unwrap()
 	if err == nil {
 		logger.Println(v...)
@@ -113,7 +125,7 @@ func (a api) Println(v ...any) {
 
 func (a *api) get(u *url.URL) result.Result[[]byte] {
 	ustr := u.String()
-	a.Printf("Get Request: %s\n", ustr)
+	a.printf("Get Request: %s\n", ustr)
 	attempts := uint8(0)
 	t := 1
 	client := http.DefaultClient
@@ -132,7 +144,7 @@ func (a *api) get(u *url.URL) result.Result[[]byte] {
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
 			resp.Body.Close()
-			a.Printf(
+			a.printf(
 				"Max Request Made! Total attempts: %d made out of %d\n",
 				attempts,
 				a.maxAttempts,
@@ -142,7 +154,7 @@ func (a *api) get(u *url.URL) result.Result[[]byte] {
 			attempts += 1
 			t <<= 1
 		} else if resp.StatusCode == http.StatusOK {
-			a.Println("Status OK, returning response")
+			a.println("Status OK, returning response")
 			defer resp.Body.Close()
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
@@ -151,7 +163,7 @@ func (a *api) get(u *url.URL) result.Result[[]byte] {
 			return result.Ok(body)
 		} else {
 			resp.Body.Close()
-			a.Println("Unauthorized or token expired, reauthentication...")
+			a.println("Unauthorized or token expired, reauthentication...")
 			err = a.setToken()
 			if err != nil {
 				return result.Err[[]byte](err)
@@ -189,25 +201,32 @@ type tokenResponse struct {
 }
 
 func (a *api) setToken() error {
-	u := &url.URL{
-		Scheme: a.scheme,
-		Host:   a.host,
-		Path:   a.endpoints.auth.Path,
+	a.authTokenMutex.Lock()
+	defer a.authTokenMutex.Unlock()
+	if time.Now().Sub(a.authTokenLastRefresh) > a.minAuthTokenRefreshInterval {
+		u := &url.URL{
+			Scheme: a.scheme,
+			Host:   a.host,
+			Path:   a.endpoints.auth.Path,
+		}
+		body, err := a.get(u).Unwrap()
+		if err != nil {
+			return err
+		}
+		var t tokenResponse
+		err = json.Unmarshal(body, &t)
+		if err != nil {
+			return err
+		}
+		a.authToken = t.Token
+		a.authTokenLastRefresh = time.Now()
+	} else {
+		a.println("Token already refreshed, skipping re-auth")
 	}
-	body, err := a.get(u).Unwrap()
-	if err != nil {
-		return err
-	}
-	var t tokenResponse
-	err = json.Unmarshal(body, &t)
-	if err != nil {
-		return err
-	}
-	a.authToken = t.Token
 	return nil
 }
 
-func (a api) categoriesURL() *url.URL {
+func (a *api) categoriesURL() *url.URL {
 	return &url.URL{
 		Scheme: a.scheme,
 		Host:   a.host,
@@ -215,7 +234,7 @@ func (a api) categoriesURL() *url.URL {
 	}
 }
 
-func (a *api) GetCategories() <-chan result.Result[[]string] {
+func (a *api) getCategories() <-chan result.Result[[]string] {
 	ret := make(chan result.Result[[]string])
 
 	type categories struct {
@@ -247,7 +266,7 @@ type categoryApi struct {
 	api      string
 }
 
-func (a api) entryURL(category string) *url.URL {
+func (a *api) entryURL(category string) *url.URL {
 	u := &url.URL{
 		Scheme: a.scheme,
 		Host:   a.host,
@@ -259,7 +278,7 @@ func (a api) entryURL(category string) *url.URL {
 	return u
 }
 
-func (a *api) GetApisFromCategory(category string) <-chan result.Result[[]categoryApi] {
+func (a *api) getApisFromCategory(category string) <-chan result.Result[[]categoryApi] {
 	ret := make(chan result.Result[[]categoryApi])
 
 	type property struct {
@@ -279,9 +298,9 @@ func (a *api) GetApisFromCategory(category string) <-chan result.Result[[]catego
 			if len(resp.Properties) == 0 {
 				return result.Err[[]categoryApi](NoMoreResponse)
 			}
-			var ret []categoryApi
-			for _, p := range resp.Properties {
-				ret = append(ret, categoryApi{category: category, api: p.Link})
+			ret := make([]categoryApi, len(resp.Properties))
+			for i, p := range resp.Properties {
+				ret[i] = categoryApi{category: category, api: p.Link}
 			}
 			return result.Ok(ret)
 		}
@@ -289,6 +308,41 @@ func (a *api) GetApisFromCategory(category string) <-chan result.Result[[]catego
 
 	go func() {
 		getPagedResponse(a.entryURL(category), a, payloadConverter, ret)
+	}()
+
+	return ret
+}
+
+func (a *api) GetApis() <-chan result.Result[[]categoryApi] {
+	ret := make(chan result.Result[[]categoryApi])
+
+	go func() {
+		catsCh := a.getCategories()
+	mainLoop:
+		for {
+			cats, err := (<-catsCh).Unwrap()
+			if err != nil {
+				ret <- result.Err[[]categoryApi](err)
+				break mainLoop
+			}
+			for _, cat := range cats {
+				catApisCh := a.getApisFromCategory(cat)
+			catApiLoop:
+				for {
+					catApis, err := (<-catApisCh).Unwrap()
+					if err != nil {
+						if err == NoMoreResponse {
+							break catApiLoop
+						} else {
+							ret <- result.Err[[]categoryApi](err)
+							break mainLoop
+						}
+					}
+					ret <- result.Ok(catApis)
+				}
+			}
+		}
+		ret <- result.Err[[]categoryApi](NoMoreResponse)
 	}()
 
 	return ret
