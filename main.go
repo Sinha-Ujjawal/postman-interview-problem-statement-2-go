@@ -6,15 +6,8 @@ import (
 )
 
 func main() {
-	public_apis_api := api.New(
-		"https",
-		"public-apis-api.herokuapp.com",
-		api.ApiEndpoints{
-			Auth:       api.Endpoint{Path: "/api/v1/auth/token"},
-			Categories: api.Endpoint{Path: "/api/v1/apis/categories"},
-		},
-	)
-	catsCh := public_apis_api.GetCategories()
+	public_apis_api := api.New("https", "public-apis-api.herokuapp.com")
+	catsCh := public_apis_api.GetApisFromCategory("Animals")
 	for {
 		cats, err := (<-catsCh).Unwrap()
 		if err != nil {

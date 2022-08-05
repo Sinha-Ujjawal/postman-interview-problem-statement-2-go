@@ -12,42 +12,72 @@ import (
 	"time"
 )
 
-const defaultMaxAttempts = 10
+const DefaultMaxAttempts = 10
 
 var NoMoreResponse = errors.New("No More Response!")
+var DefaultAuthEndpoint = Endpoint{Path: "/api/v1/auth/token"}
+var DefaultCategoriesEndpoint = Endpoint{Path: "/api/v1/apis/categories"}
+var DefaultEntryEndpoint = Endpoint{Path: "api/v1/apis/entry"}
 
 type Endpoint struct {
 	Path string
 }
 
-type ApiEndpoints struct {
-	Auth       Endpoint
-	Categories Endpoint
+type apiEndpoints struct {
+	auth       Endpoint
+	categories Endpoint
+	entry      Endpoint
 }
 
 type api struct {
 	scheme      string
 	host        string
-	endpoints   ApiEndpoints
+	endpoints   apiEndpoints
 	authToken   string
 	maxAttempts uint8
 }
 
-type apiOpts func(*api)
+type apiOption func(*api)
 
-func WithMaxAttempts(maxAttempts uint8) apiOpts {
+func WithMaxAttempts(maxAttempts uint8) apiOption {
 	return func(api *api) {
 		api.maxAttempts = maxAttempts
+	}
+}
+
+func WithAuthEndpoint(endpoint Endpoint) apiOption {
+	return func(api *api) {
+		api.endpoints.auth = endpoint
+	}
+}
+
+func WithCategoriesEndpoint(endpoint Endpoint) apiOption {
+	return func(api *api) {
+		api.endpoints.categories = endpoint
+	}
+}
+
+func WithEntryEndpoint(endpoint Endpoint) apiOption {
+	return func(api *api) {
+		api.endpoints.entry = endpoint
 	}
 }
 
 func New(
 	scheme string,
 	host string,
-	endpoints ApiEndpoints,
-	opts ...apiOpts,
+	opts ...apiOption,
 ) api {
-	a := api{scheme: scheme, host: host, endpoints: endpoints, maxAttempts: defaultMaxAttempts}
+	a := api{
+		scheme: scheme,
+		host:   host,
+		endpoints: apiEndpoints{
+			auth:       defaultAuthEndpoint,
+			categories: defaultCategoriesEndpoint,
+			entry:      defaultEntryEndpoint,
+		},
+		maxAttempts: defaultMaxAttempts,
+	}
 	for _, opt := range opts {
 		opt(&a)
 	}
@@ -58,7 +88,7 @@ func bearerToken(token string) string {
 	return fmt.Sprintf("Bearer %s", token)
 }
 
-func get(u *url.URL, a *api) result.Result[[]byte] {
+func (a *api) get(u *url.URL) result.Result[[]byte] {
 	ustr := u.String()
 	log.Printf("Get Request: %s\n", ustr)
 	attempts := uint8(0)
@@ -122,7 +152,7 @@ func getPagedResponse[T any](
 	page := uint32(1)
 	for {
 		setPage(u, page)
-		payload, err := get(u, a).Unwrap()
+		payload, err := a.get(u).Unwrap()
 		if err != nil {
 			break
 		}
@@ -136,13 +166,12 @@ type tokenResponse struct {
 }
 
 func (a *api) setToken() error {
-	auth := a.endpoints.Auth
 	u := &url.URL{
 		Scheme: a.scheme,
 		Host:   a.host,
-		Path:   auth.Path,
+		Path:   a.endpoints.auth.Path,
 	}
-	body, err := get(u, a).Unwrap()
+	body, err := a.get(u).Unwrap()
 	if err != nil {
 		return err
 	}
@@ -156,11 +185,10 @@ func (a *api) setToken() error {
 }
 
 func (a api) categoriesURL() *url.URL {
-	categories := a.endpoints.Categories
 	return &url.URL{
 		Scheme: a.scheme,
 		Host:   a.host,
-		Path:   categories.Path,
+		Path:   a.endpoints.categories.Path,
 	}
 }
 
@@ -186,6 +214,58 @@ func (a *api) GetCategories() <-chan result.Result[[]string] {
 
 	go func() {
 		getPagedResponse(a.categoriesURL(), a, payloadConverter, ret)
+	}()
+
+	return ret
+}
+
+type categoryApi struct {
+	category string
+	api      string
+}
+
+func (a api) entryURL(category string) *url.URL {
+	u := &url.URL{
+		Scheme: a.scheme,
+		Host:   a.host,
+		Path:   a.endpoints.entry.Path,
+	}
+	rq := u.Query()
+	rq.Set("category", category)
+	u.RawQuery = rq.Encode()
+	return u
+}
+
+func (a *api) GetApisFromCategory(category string) <-chan result.Result[[]categoryApi] {
+	ret := make(chan result.Result[[]categoryApi])
+
+	type property struct {
+		Link string `json:"Link"`
+	}
+
+	type categoryApis struct {
+		Properties []property `json:"categories"`
+	}
+
+	payloadConverter := func(data []byte) result.Result[[]categoryApi] {
+		var resp categoryApis
+		err := json.Unmarshal(data, &resp)
+		if err != nil {
+			return result.Err[[]categoryApi](err)
+		} else {
+			if len(resp.Properties) == 0 {
+				return result.Err[[]categoryApi](NoMoreResponse)
+			}
+			var ret []categoryApi
+			for _, p := range resp.Properties {
+				ret = append(ret, categoryApi{category: category, api: p.Link})
+			}
+			return result.Ok(ret)
+		}
+	}
+
+	go func() {
+		getPagedResponse(a.entryURL(category), a, payloadConverter, ret)
 	}()
 
 	return ret
