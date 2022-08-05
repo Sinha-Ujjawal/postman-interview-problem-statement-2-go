@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github_apis/optional"
 	"github_apis/result"
 	"io"
 	"log"
@@ -35,6 +36,7 @@ type api struct {
 	endpoints   apiEndpoints
 	authToken   string
 	maxAttempts uint8
+	logger      optional.Optional[*log.Logger]
 }
 
 type apiOption func(*api)
@@ -63,6 +65,12 @@ func WithEntryEndpoint(endpoint Endpoint) apiOption {
 	}
 }
 
+func WithLogger(logger *log.Logger) apiOption {
+	return func(api *api) {
+		api.logger = optional.Some(logger)
+	}
+}
+
 func New(
 	scheme string,
 	host string,
@@ -77,6 +85,7 @@ func New(
 			entry:      DefaultEntryEndpoint,
 		},
 		maxAttempts: DefaultMaxAttempts,
+		logger:      optional.None[*log.Logger](),
 	}
 	for _, opt := range opts {
 		opt(&a)
@@ -88,9 +97,23 @@ func bearerToken(token string) string {
 	return fmt.Sprintf("Bearer %s", token)
 }
 
+func (a api) Printf(format string, v ...any) {
+	logger, err := a.logger.Unwrap()
+	if err == nil {
+		logger.Printf(format, v...)
+	}
+}
+
+func (a api) Println(v ...any) {
+	logger, err := a.logger.Unwrap()
+	if err == nil {
+		logger.Println(v...)
+	}
+}
+
 func (a *api) get(u *url.URL) result.Result[[]byte] {
 	ustr := u.String()
-	log.Printf("Get Request: %s\n", ustr)
+	a.Printf("Get Request: %s\n", ustr)
 	attempts := uint8(0)
 	t := 1
 	client := http.DefaultClient
@@ -109,7 +132,7 @@ func (a *api) get(u *url.URL) result.Result[[]byte] {
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
 			resp.Body.Close()
-			log.Printf(
+			a.Printf(
 				"Max Request Made! Total attempts: %d made out of %d\n",
 				attempts,
 				a.maxAttempts,
@@ -119,7 +142,7 @@ func (a *api) get(u *url.URL) result.Result[[]byte] {
 			attempts += 1
 			t <<= 1
 		} else if resp.StatusCode == http.StatusOK {
-			log.Println("Status OK, returning response")
+			a.Println("Status OK, returning response")
 			defer resp.Body.Close()
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
@@ -128,7 +151,7 @@ func (a *api) get(u *url.URL) result.Result[[]byte] {
 			return result.Ok(body)
 		} else {
 			resp.Body.Close()
-			log.Println("Unauthorized or token expired, reauthentication...")
+			a.Println("Unauthorized or token expired, reauthentication...")
 			err = a.setToken()
 			if err != nil {
 				return result.Err[[]byte](err)

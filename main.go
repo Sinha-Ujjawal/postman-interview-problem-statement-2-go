@@ -1,12 +1,16 @@
 package main
 
 import (
+	"fmt"
 	"github_apis/api"
-	"log"
 )
 
 func main() {
-	public_apis_api := api.New("https", "public-apis-api.herokuapp.com")
+	public_apis_api := api.New(
+		"https",
+		"public-apis-api.herokuapp.com",
+		// api.WithLogger(log.Default()),
+	)
 	catsCh := public_apis_api.GetApisFromCategory("Animals")
 	for {
 		cats, err := (<-catsCh).Unwrap()
@@ -16,7 +20,7 @@ func main() {
 			}
 			panic(err)
 		}
-		log.Println(cats)
+		fmt.Println(cats)
 	}
 	println("Safely exited")
 }
