@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github_apis/optional"
 	"github_apis/result"
 	"io"
 	"log"
@@ -41,7 +40,7 @@ type api struct {
 	minAuthTokenRefreshInterval time.Duration
 	authTokenMutex              sync.Mutex
 	maxAttempts                 uint8
-	logger                      optional.Optional[*log.Logger]
+	logger                      *log.Logger
 }
 
 type apiOption func(*api)
@@ -72,7 +71,7 @@ func WithEntryEndpoint(endpoint Endpoint) apiOption {
 
 func WithLogger(logger *log.Logger) apiOption {
 	return func(api *api) {
-		api.logger = optional.Some(logger)
+		api.logger = logger
 	}
 }
 
@@ -97,7 +96,6 @@ func New(
 		},
 		maxAttempts:                 DefaultMaxAttempts,
 		minAuthTokenRefreshInterval: DefaultMinAuthTokenRefreshInterval,
-		logger:                      optional.None[*log.Logger](),
 	}
 	for _, opt := range opts {
 		opt(&a)
@@ -110,16 +108,14 @@ func bearerToken(token string) string {
 }
 
 func (a *api) printf(format string, v ...any) {
-	logger, err := a.logger.Unwrap()
-	if err == nil {
-		logger.Printf(format, v...)
+	if a.logger != nil {
+		a.logger.Printf(format, v...)
 	}
 }
 
 func (a *api) println(v ...any) {
-	logger, err := a.logger.Unwrap()
-	if err == nil {
-		logger.Println(v...)
+	if a.logger != nil {
+		a.logger.Println(v...)
 	}
 }
 
