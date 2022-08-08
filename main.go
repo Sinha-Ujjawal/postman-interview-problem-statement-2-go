@@ -19,14 +19,10 @@ func main() {
 		"public-apis-api.herokuapp.com",
 		api.WithLogger(log.Default()),
 	)
-	apisCH := public_apis_api.GetApis()
 	totalApis := 0
-	for {
-		apis, err := (<-apisCH).Unwrap()
+	for apisErr := range public_apis_api.GetApis() {
+		apis, err := apisErr.Unwrap()
 		if err != nil {
-			if err == api.NoMoreResponse {
-				break
-			}
 			panic(err)
 		}
 		log.Println(apis)

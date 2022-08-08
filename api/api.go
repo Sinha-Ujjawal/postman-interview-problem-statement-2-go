@@ -16,7 +16,6 @@ import (
 const DefaultMaxAttempts = 10
 const DefaultMinAuthTokenRefreshInterval time.Duration = time.Minute * 1
 
-var NoMoreResponse = errors.New("No More Response!")
 var DefaultAuthEndpoint = Endpoint{Path: "/api/v1/auth/token"}
 var DefaultCategoriesEndpoint = Endpoint{Path: "/api/v1/apis/categories"}
 var DefaultEntryEndpoint = Endpoint{Path: "api/v1/apis/entry"}
@@ -169,11 +168,10 @@ func (a *api) get(u *url.URL) ([]byte, error) {
 	return nil, errors.New(fmt.Sprintf("Max attempts: %d reached!", a.maxAttempts))
 }
 
-func getPagedResponse[T any](
+func getPagedResponse(
 	u *url.URL,
 	a *api,
-	payloadConverter func([]byte) T,
-	cout chan<- T,
+	handlePayload func([]byte) bool,
 ) {
 	setPage := func(u *url.URL, page uint32) {
 		rq := u.Query()
@@ -187,7 +185,9 @@ func getPagedResponse[T any](
 		if err != nil {
 			break
 		}
-		cout <- payloadConverter(payload)
+		if handlePayload(payload) {
+			break
+		}
 		page += 1
 	}
 }
@@ -237,21 +237,24 @@ func (a *api) getCategories() <-chan result.Result[[]string] {
 		Categories []string `json:"categories"`
 	}
 
-	payloadConverter := func(data []byte) result.Result[[]string] {
+	handlePayload := func(data []byte) bool {
 		var cats categories
 		err := json.Unmarshal(data, &cats)
 		if err != nil {
-			return result.Err[[]string](err)
-		} else {
-			if len(cats.Categories) == 0 {
-				return result.Err[[]string](NoMoreResponse)
-			}
-			return result.Ok(cats.Categories)
+			ret <- result.Err[[]string](err)
+			close(ret)
+			return true
 		}
+		if len(cats.Categories) == 0 {
+			close(ret)
+			return true
+		}
+		ret <- result.Ok(cats.Categories)
+		return false
 	}
 
 	go func() {
-		getPagedResponse(a.categoriesURL(), a, payloadConverter, ret)
+		getPagedResponse(a.categoriesURL(), a, handlePayload)
 	}()
 
 	return ret
@@ -285,25 +288,28 @@ func (a *api) getApisFromCategory(category string) <-chan result.Result[[]catego
 		Properties []property `json:"categories"`
 	}
 
-	payloadConverter := func(data []byte) result.Result[[]categoryApi] {
+	handlePayload := func(data []byte) bool {
 		var resp categoryApis
 		err := json.Unmarshal(data, &resp)
 		if err != nil {
-			return result.Err[[]categoryApi](err)
-		} else {
-			if len(resp.Properties) == 0 {
-				return result.Err[[]categoryApi](NoMoreResponse)
-			}
-			ret := make([]categoryApi, len(resp.Properties))
-			for i, p := range resp.Properties {
-				ret[i] = categoryApi{category: category, api: p.Link}
-			}
-			return result.Ok(ret)
+			ret <- result.Err[[]categoryApi](err)
+			close(ret)
+			return true
 		}
+		if len(resp.Properties) == 0 {
+			close(ret)
+			return true
+		}
+		categoryApis := make([]categoryApi, len(resp.Properties))
+		for i, p := range resp.Properties {
+			categoryApis[i] = categoryApi{category: category, api: p.Link}
+		}
+		ret <- result.Ok(categoryApis)
+		return false
 	}
 
 	go func() {
-		getPagedResponse(a.entryURL(category), a, payloadConverter, ret)
+		getPagedResponse(a.entryURL(category), a, handlePayload)
 	}()
 
 	return ret
@@ -313,32 +319,25 @@ func (a *api) GetApis() <-chan result.Result[[]categoryApi] {
 	ret := make(chan result.Result[[]categoryApi])
 
 	go func() {
-		catsCh := a.getCategories()
 	mainLoop:
-		for {
-			cats, err := (<-catsCh).Unwrap()
+		for catsErr := range a.getCategories() {
+			cats, err := catsErr.Unwrap()
 			if err != nil {
 				ret <- result.Err[[]categoryApi](err)
 				break mainLoop
 			}
 			for _, cat := range cats {
-				catApisCh := a.getApisFromCategory(cat)
-			catApiLoop:
-				for {
-					catApis, err := (<-catApisCh).Unwrap()
+				for catApisErr := range a.getApisFromCategory(cat) {
+					catApis, err := catApisErr.Unwrap()
 					if err != nil {
-						if err == NoMoreResponse {
-							break catApiLoop
-						} else {
-							ret <- result.Err[[]categoryApi](err)
-							break mainLoop
-						}
+						ret <- result.Err[[]categoryApi](err)
+						break mainLoop
 					}
 					ret <- result.Ok(catApis)
 				}
 			}
 		}
-		ret <- result.Err[[]categoryApi](NoMoreResponse)
+		close(ret)
 	}()
 
 	return ret
